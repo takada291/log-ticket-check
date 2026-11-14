@@ -102,7 +102,7 @@
 <body>
 
     <div class="container">
-        <h1>出材伝票集計確認 v0.2</h1>
+        <h1>出材伝票集計確認 v0.3</h1>
         
         <div class="api-note">
             <strong>APIキー設定（初回のみ）</strong><br>
@@ -197,10 +197,12 @@
             }
         }
 
-        // 3.8最優先＆90秒タイムアウトの堅牢なフォールバック機構
-        const MODEL_CANDIDATES = ["gemini-3.8-flash", "gemini-3.6-flash"];
+        // Hydrogen最優先・思考レベルLOW固定・タイムアウト180秒
+        const MODEL_CANDIDATES = ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-2.5-flash"];
+        const FIXED_THINKING_LEVEL = "LOW";
+        const TIMEOUT_MS = 180000;
 
-        async function fetchWithTimeout(url, options, timeoutMs = 90000) {
+        async function fetchWithTimeout(url, options, timeoutMs = TIMEOUT_MS) {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), timeoutMs);
             try { return await fetch(url, { ...options, signal: controller.signal }); } 
@@ -210,27 +212,27 @@
         async function callGeminiWithFallback(apiKey, basePayload, onStatusUpdate) {
             let lastErrorMsg = "";
             for (const modelName of MODEL_CANDIDATES) {
-                if (onStatusUpdate) onStatusUpdate(modelName);
-                const isGemini3 = modelName.startsWith("gemini-3");
+                if (onStatusUpdate) onStatusUpdate(`${modelName} (${FIXED_THINKING_LEVEL})`);
+                const supportsThinking = modelName.startsWith("gemini-4") || modelName.startsWith("gemini-3");
                 const payloadWithThinking = JSON.parse(JSON.stringify(basePayload));
-                if (isGemini3) {
+                if (supportsThinking) {
                     payloadWithThinking.generationConfig = {
                         ...(payloadWithThinking.generationConfig || {}),
-                        thinkingConfig: { thinkingLevel: "LOW" }
+                        thinkingConfig: { thinkingLevel: FIXED_THINKING_LEVEL }
                     };
                 }
                 try {
                     let response = await fetchWithTimeout(
                         `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
                         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payloadWithThinking) },
-                        90000
+                        TIMEOUT_MS
                     );
                     let data = await response.json();
-                    if (data.error && response.status === 400 && isGemini3) {
+                    if (data.error && response.status === 400 && supportsThinking) {
                         response = await fetchWithTimeout(
                             `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
                             { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(basePayload) },
-                            90000
+                            TIMEOUT_MS
                         );
                         data = await response.json();
                     }
@@ -241,10 +243,10 @@
                     if (data.candidates && data.candidates[0] && data.candidates[0].content) {
                         const parts = data.candidates[0].content.parts || [];
                         const answerPart = parts.find(p => typeof p.text === 'string' && !p.thought) || parts.find(p => typeof p.text === 'string');
-                        if (answerPart) { return { text: answerPart.text, usedModel: modelName }; }
+                        if (answerPart) { return { text: answerPart.text, usedModel: `${modelName} [思考:${FIXED_THINKING_LEVEL}]` }; }
                     }
                 } catch (err) {
-                    lastErrorMsg = `[${modelName}] ${err.name === 'AbortError' ? 'タイムアウト(90秒超過)' : err.message}`;
+                    lastErrorMsg = `[${modelName}] ${err.name === 'AbortError' ? 'タイムアウト(180秒超過)' : err.message}`;
                 }
             }
             throw new Error(lastErrorMsg || "AIモデルでの通信に失敗しました。APIキーや利用制限をご確認ください。");
